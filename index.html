@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#4f46e5">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon-192.png">
+<title>Private Room</title>
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--card:#f3f3f5;--accent:#4f46e5;--mine:#4f46e5;--theirs:#e5e5ea}
+@media(prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--card:#1d1d21;--theirs:#2a2a30}}
+*{box-sizing:border-box}body{margin:0;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);font-family:system-ui,sans-serif;background:var(--bg);color:var(--fg);height:100dvh;display:flex;flex-direction:column}
+button,input{font:inherit;font-size:16px;padding:12px 14px;border-radius:10px;border:1px solid #8884;background:var(--card);color:var(--fg)}
+button{cursor:pointer}button.p{background:var(--accent);color:#fff;border:0}button.r{background:#dc2626;color:#fff;border:0}
+#join{margin:auto;display:flex;flex-direction:column;gap:12px;width:min(340px,90%)}
+#app{display:none;flex:1;flex-direction:column;min-height:0}
+header{display:flex;gap:8px;align-items:center;padding:10px;flex-wrap:wrap;border-bottom:1px solid #8883}
+#video{display:none;position:relative;background:#000;height:36vh}
+#remote{width:100%;height:100%;object-fit:contain}
+#local{position:absolute;right:8px;bottom:8px;width:90px;border-radius:8px;border:2px solid #fff}
+#msgs{flex:1;overflow-y:auto;padding:12px;display:flex;flex-direction:column;gap:6px}
+.m{max-width:80%;padding:8px 12px;border-radius:14px;background:var(--theirs);align-self:flex-start;word-wrap:break-word}
+.m.me{background:var(--mine);color:#fff;align-self:flex-end}.sys{align-self:center;font-size:.8em;opacity:.6}
+#bar{display:flex;gap:8px;padding:10px;border-top:1px solid #8883}#bar input{flex:1}
+#incoming{display:none;padding:10px;background:var(--card);gap:8px;align-items:center}
+</style></head><body>
+<div id="join">
+  <h2>Private Room</h2>
+  <button class="p" id="create">Create new room</button>
+  <input id="rid" placeholder="Or enter a room ID">
+  <button id="joinBtn">Join room</button>
+</div>
+<div id="app">
+  <header>
+    <b>Room: <span id="code"></span></b>
+    <button id="copy">Share link</button>
+    <button id="aCall">🎤 Audio call</button>
+    <button id="vCall">📹 Video call</button>
+    <button id="mute" style="display:none">Mute</button>
+    <button id="spk" style="display:none">Speaker off</button>
+    <button id="cam" style="display:none">Camera off</button>
+    <button class="r" id="end" style="display:none">End</button>
+  </header>
+  <div id="incoming"><span id="inTxt"></span><button class="p" id="acc">Accept</button><button id="dec">Decline</button></div>
+  <div id="video"><video id="remote" autoplay playsinline></video><video id="local" autoplay playsinline muted></video></div>
+  <div id="msgs"></div>
+  <form id="bar"><input id="txt" placeholder="Type a message" autocomplete="off"><button class="p">Send</button></form>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+let ws,room,pc,local,pendingVideo;
+const cfg={iceServers:[{urls:'stun:stun.l.google.com:19302'}]};
+const send=o=>ws&&ws.readyState===1&&ws.send(JSON.stringify(o));
+const sys=t=>add(t,'sys');
+function add(t,c){const d=document.createElement('div');d.className='m '+(c||'');d.textContent=t;$('msgs').append(d);$('msgs').scrollTop=1e9}
+
+function newId(){const a=crypto.getRandomValues(new Uint8Array(8));return Array.from(a,b=>'abcdefghjkmnpqrstuvwxyz23456789'[b%31]).join('')}
+function enter(id){
+  room=id;$('join').style.display='none';$('app').style.display='flex';$('code').textContent=id;
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host);
+  ws.onopen=()=>send({type:'join',room:id});
+  ws.onmessage=e=>handle(JSON.parse(e.data));
+  ws.onclose=()=>sys('Disconnected');
+}
+$('create').onclick=()=>enter(newId());
+$('joinBtn').onclick=()=>{const v=$('rid').value.trim();if(v)enter(v)};
+$('copy').onclick=async()=>{
+  const url=location.origin+'/?room='+room;
+  try{ if(navigator.share) await navigator.share({title:'Private room',text:'Join my private room',url}); else {await navigator.clipboard.writeText(url);sys('Link copied')} }catch{}
+};
+$('spk').onclick=()=>{const r=$('remote');r.muted=!r.muted;$('spk').textContent=r.muted?'Speaker on':'Speaker off'};
+const q=new URLSearchParams(location.search).get('room'); if(q)$('rid').value=q;
+if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+$('bar').onsubmit=e=>{e.preventDefault();const t=$('txt').value.trim();if(!t)return;send({type:'chat',t});add(t,'me');$('txt').value=''};
+
+async function media(video){
+  local=await navigator.mediaDevices.getUserMedia({audio:true,video});
+  $('local').srcObject=local;showCall(video);
+}
+function showCall(video){
+  $('video').style.display=video?'block':'none';$('local').style.display=video?'block':'none';
+  ['mute','spk','end'].forEach(i=>$(i).style.display='inline-block');$('cam').style.display=video?'inline-block':'none';
+}
+function makePC(){
+  pc=new RTCPeerConnection(cfg);
+  local.getTracks().forEach(t=>pc.addTrack(t,local));
+  pc.ontrack=e=>{$('remote').srcObject=e.streams[0];if(e.track.kind==='audio'&&!pendingVideo)$('remote').style.display='block'};
+  pc.onicecandidate=e=>e.candidate&&send({type:'ice',c:e.candidate});
+}
+function cleanup(){
+  pc&&pc.close();pc=null;local&&local.getTracks().forEach(t=>t.stop());local=null;
+  $('remote').srcObject=null;$('video').style.display='none';
+  ['mute','spk','cam','end'].forEach(i=>$(i).style.display='none');$('remote').muted=false;$('spk').textContent='Speaker off';$('incoming').style.display='none';
+}
+async function start(video){
+  try{pendingVideo=video;await media(video);send({type:'call',video});sys('Calling…')}
+  catch{sys('Could not access mic/camera');cleanup()}
+}
+$('aCall').onclick=()=>start(false);$('vCall').onclick=()=>start(true);
+$('acc').onclick=async()=>{
+  $('incoming').style.display='none';
+  try{await media(pendingVideo);makePC();send({type:'accept'})}catch{sys('Could not access mic/camera');cleanup()}
+};
+$('dec').onclick=()=>{$('incoming').style.display='none';send({type:'hangup'})};
+$('end').onclick=()=>{send({type:'hangup'});cleanup();sys('Call ended')};
+$('mute').onclick=()=>{const t=local.getAudioTracks()[0];t.enabled=!t.enabled;$('mute').textContent=t.enabled?'Mute':'Unmute'};
+$('cam').onclick=()=>{const t=local.getVideoTracks()[0];t.enabled=!t.enabled;$('cam').textContent=t.enabled?'Camera off':'Camera on'};
+
+async function handle(m){
+  switch(m.type){
+    case 'full':sys('Room is full (private, 2 people max)');ws.close();break;
+    case 'joined':sys(m.peers>1?'Connected to your partner':'Waiting for someone to join…');break;
+    case 'peer-joined':sys('Someone joined');break;
+    case 'peer-left':sys('Partner left');cleanup();break;
+    case 'chat':add(m.t);break;
+    case 'call':pendingVideo=m.video;$('inTxt').textContent=(m.video?'Video':'Audio')+' call incoming';$('incoming').style.display='flex';break;
+    case 'accept':makePC();{const o=await pc.createOffer();await pc.setLocalDescription(o);send({type:'offer',d:o})}break;
+    case 'offer':await pc.setRemoteDescription(m.d);{const a=await pc.createAnswer();await pc.setLocalDescription(a);send({type:'answer',d:a})}break;
+    case 'answer':await pc.setRemoteDescription(m.d);break;
+    case 'ice':try{pc&&await pc.addIceCandidate(m.c)}catch{}break;
+    case 'hangup':cleanup();sys('Call ended');break;
+  }
+}
+</script></body></html>
